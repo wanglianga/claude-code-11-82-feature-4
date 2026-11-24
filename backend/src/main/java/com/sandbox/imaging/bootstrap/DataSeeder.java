@@ -5,6 +5,10 @@ import com.sandbox.imaging.domain.*;
 import com.sandbox.imaging.dto.ApprovalSpec;
 import com.sandbox.imaging.repo.*;
 import com.sandbox.imaging.service.ApprovalService;
+import com.sandbox.imaging.service.AnalysisVersionService;
+import com.sandbox.imaging.service.LinkGovernanceService;
+import com.sandbox.imaging.service.LinkSealService;
+import com.sandbox.imaging.service.LinkTokenService;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Component;
@@ -33,14 +37,22 @@ public class DataSeeder implements CommandLineRunner {
     private final VisitRepository visitRepo;
     private final ImagingRecordRepository imagingRepo;
     private final ApprovalRepository approvalRepo;
+    private final AnalysisVersionRepository versionRepo;
     private final ApprovalService approvalService;
+    private final AnalysisVersionService versionService;
+    private final LinkGovernanceService linkGovernanceService;
+    private final LinkSealService linkSealService;
+    private final LinkTokenService linkTokenService;
     private final PasswordEncoder encoder;
     private final ObjectMapper mapper;
 
     public DataSeeder(AppUserRepository userRepo, ResearchSpaceRepository spaceRepo,
                       WaterlineRepository waterlineRepo, PatientRepository patientRepo,
                       VisitRepository visitRepo, ImagingRecordRepository imagingRepo,
-                      ApprovalRepository approvalRepo, ApprovalService approvalService,
+                      ApprovalRepository approvalRepo, AnalysisVersionRepository versionRepo,
+                      ApprovalService approvalService, AnalysisVersionService versionService,
+                      LinkGovernanceService linkGovernanceService,
+                      LinkSealService linkSealService, LinkTokenService linkTokenService,
                       PasswordEncoder encoder, ObjectMapper mapper) {
         this.userRepo = userRepo;
         this.spaceRepo = spaceRepo;
@@ -49,7 +61,12 @@ public class DataSeeder implements CommandLineRunner {
         this.visitRepo = visitRepo;
         this.imagingRepo = imagingRepo;
         this.approvalRepo = approvalRepo;
+        this.versionRepo = versionRepo;
         this.approvalService = approvalService;
+        this.versionService = versionService;
+        this.linkGovernanceService = linkGovernanceService;
+        this.linkSealService = linkSealService;
+        this.linkTokenService = linkTokenService;
         this.encoder = encoder;
         this.mapper = mapper;
     }
@@ -125,6 +142,27 @@ public class DataSeeder implements CommandLineRunner {
         Approval ae = approvalService.compile(space.getId(), "APV-EXPIRED",
                 "已到期批准（到期拒新读演示）", expired);
         approvalService.activate(ae.getId());
+
+        seedLinkDemo(a2);
+    }
+
+    /**
+     * 链接版本封存演示：两条路线各封一个版本，均绑定 APV-S2（A8/B7，可安全披露）与 WL-2026Q4。
+     * - LNK（托管封条）供“密钥轮换后快速重放”；
+     * - LNK（提供方重建）供“最小留存映射 + 提供方可用重建”。
+     * 不在此处轮换密钥或重建，留给界面一键演示以便观察完整过程。
+     */
+    private void seedLinkDemo(Approval a2) {
+        if (!linkTokenService.listKeys().isEmpty()) return;
+        linkGovernanceService.bootstrapDemo();
+        AnalysisVersion v = versionService.create(a2.getId(), a2.getPurpose(), "WL-2026Q4", "feat-v1");
+
+        // 托管封条路线：预置为“重放频率高”，托管面较大但重放快
+        linkSealService.seal(a2.getId(), v.getId(), "PRV-A", "ESCROW_SEAL",
+                "HIGH", "MEDIUM", 60 * 24 * 30, "tk-rules-v1", null, null);
+        // 提供方重建路线：预置为“重放频率低 + 提供方可用”，留存映射最少
+        linkSealService.seal(a2.getId(), v.getId(), "PRV-B", "PROVIDER_REBUILD",
+                "LOW", "LOW", 60 * 24 * 30, "tk-rules-v1", null, null);
     }
 
     private void seedPeriod(List<Patient> patients, int year, int monthFrom, int monthTo,

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""端到端验证：14/1 联合阻断、8/7 保留、撤回/到期拒新读、预算规则、算法升级、冻结复现。"""
+"""端到端验证：14/1 联合阻断、8/7 保留、撤回/到期拒新读、预算规则、算法升级、冻结复现，
+以及链接版本封存/密钥轮换/受控重建/一致性核对/到期证明。"""
 import json
 import urllib.request
 import urllib.error
@@ -207,6 +208,94 @@ check("零窄化不增加已用量", ledger_end["pointsSpent"] == 1, str(ledger_
 
 # 恢复空间默认上限，避免影响后续手工探索
 call("POST", "/admin/spaces/1/budget-cap", admin, {"quarterlyBudget": 10})
+
+# ---------- 链接版本封存：密钥轮换后仍恢复原成员；不一致阻断；到期证明 ----------
+print("\n=== 链接版本封存与受控重建（院外令牌链接） ===")
+# 使用仍 ACTIVE 的 APV-S1 现场封存两条路线，保证脚本可重复执行
+lk_v = call("POST", f"/approvals/{s1}/versions", analyst,
+            {"purpose": "中心医院联合影像研究", "waterlineLabel": "WL-2026Q3",
+             "algorithmVersion": "feat-v1"})
+escrow = call("POST", "/link/versions", analyst,
+              {"approvalId": s1, "analysisVersionId": lk_v["id"], "providerCode": "PRV-A",
+               "strategy": "ESCROW_SEAL", "replayFrequency": "HIGH", "escrowRisk": "MEDIUM",
+               "reproduceWindowMinutes": 43200, "ruleLabel": "tk-rules-v1"})
+provider_route = call("POST", "/link/versions", analyst,
+                      {"approvalId": s1, "analysisVersionId": lk_v["id"], "providerCode": "PRV-B",
+                       "strategy": "PROVIDER_REBUILD", "replayFrequency": "LOW", "escrowRisk": "LOW",
+                       "reproduceWindowMinutes": 43200, "ruleLabel": "tk-rules-v1"})
+check("现场封存两条留存路线", escrow["sealingStrategy"] == "ESCROW_SEAL"
+      and provider_route["sealingStrategy"] == "PROVIDER_REBUILD"
+      and escrow["memberCount"] > 0 and provider_route["memberCount"] > 0,
+      f"escrow={escrow['code']}/{escrow['memberCount']} provider={provider_route['code']}/{provider_route['memberCount']}")
+
+# 封存包保留复现闭包：输入批次/规则版本/候选阻断规则/用途授权快照/匹配权限/成员摘要
+ledger = call("GET", f"/link/versions/{escrow['id']}/ledger", analyst)
+lv = ledger["linkVersion"]
+closure_ok = (lv.get("sealPackage") is not None
+              and ledger.get("providerInputBatch", {}).get("batchHash")
+              and ledger.get("tokenRuleVersion", {}).get("label") == "tk-rules-v1"
+              and lv.get("candidateBlockingRule", {}).get("requireHospitalMatch") is True
+              and ledger.get("purposeAuthorization", {}).get("snapshotHash")
+              and lv.get("matchPermission", {}).get("requireSamePurposeScope") is True
+              and lv.get("memberDigest", {}).get("digestRoot"))
+check("封存包含提供方批次/令牌规则/候选阻断规则/用途授权快照/匹配权限/成员摘要", bool(closure_ok))
+
+# 密钥未轮换前两条路线均复现原成员
+pre = {v["sealingStrategy"]: call("POST", f"/link/versions/{v['id']}/rebuild", analyst, {})
+       for v in (escrow, provider_route)}
+check("轮换前两条路线均逐项一致复现",
+      all(r["verdict"] == "REPRODUCED_OK" and r["claimsOldExperimentReproduction"] for r in pre.values()),
+      {k: (v["verdict"], v["rebuiltMemberCount"]) for k, v in pre.items()})
+
+# 轮换密钥
+rot = call("POST", "/admin/link/keys/rotate", admin, {"note": "e2e 轮换"})
+check("密钥轮换产生新代际并停用旧代际", rot["retiredKid"] != rot["newKid"])
+
+# 轮换后：仍按旧规则/旧授权快照恢复原成员
+post = {v["sealingStrategy"]: call("POST", f"/link/versions/{v['id']}/rebuild", analyst, {})
+        for v in (escrow, provider_route)}
+check("密钥轮换后托管封条路线仍恢复原成员", post["ESCROW_SEAL"]["verdict"] == "REPRODUCED_OK"
+      and post["ESCROW_SEAL"]["digestRootMatch"] is True
+      and post["ESCROW_SEAL"]["rebuiltMemberCount"] == pre["ESCROW_SEAL"]["rebuiltMemberCount"])
+check("密钥轮换后提供方重建路线仍恢复原成员", post["PROVIDER_REBUILD"]["verdict"] == "REPRODUCED_OK"
+      and post["PROVIDER_REBUILD"]["digestRootMatch"] is True)
+
+# 对比：用轮换后新密钥重建 => 必然漂移，且被禁止称为旧实验复现，并输出差异调查
+drift = call("POST", f"/link/versions/{escrow['id']}/rebuild", analyst, {"ruleBasis": "CURRENT_KEY_DRIFT"})
+check("用新密钥重建判定 DIVERGED 且禁止称为旧实验复现",
+      drift["verdict"] == "DIVERGED" and drift["claimsOldExperimentReproduction"] is False,
+      drift["verdict"])
+check("漂移输出差异调查清单",
+      drift["diff"]["digestRootMatch"] is False
+      and isinstance(drift["diff"].get("investigationChecklist"), list)
+      and len(drift["diff"]["investigationChecklist"]) > 0)
+
+# 证据不完整：提供方不可用时重建路线进入证据不完整而非成员漂移
+call("POST", "/admin/link/providers/PRV-B/status", admin, {"status": "UNAVAILABLE"})
+gap = call("POST", f"/link/versions/{provider_route['id']}/rebuild", analyst, {})
+check("提供方不可用 => 证据不完整而非成员漂移",
+      gap["verdict"] == "EVIDENCE_INCOMPLETE" and gap["claimsOldExperimentReproduction"] is False,
+      gap.get("evidenceGaps"))
+call("POST", "/admin/link/providers/PRV-B/status", admin, {"status": "AVAILABLE"})
+
+# 用途授权快照缺失同样进入证据不完整
+pas = call("GET", "/link/purpose-authorizations", analyst)
+pa_id = escrow["purposeAuthorizationId"]
+call("POST", f"/admin/link/purpose-authorizations/{pa_id}/status", admin, {"missing": True})
+gap2 = call("POST", f"/link/versions/{escrow['id']}/rebuild", analyst, {})
+check("用途授权快照缺失 => 证据不完整", gap2["verdict"] == "EVIDENCE_INCOMPLETE")
+call("POST", f"/admin/link/purpose-authorizations/{pa_id}/status", admin, {"missing": False})
+
+# 到期证明：销毁逐例恢复能力，只留不可逆统计摘要，重建返回 410
+cert = call("POST", f"/admin/link/versions/{escrow['id']}/force-expire", admin, {"reason": "e2e 到期"})
+check("签发到期证明且逐例不可恢复", cert["perCaseRecoverable"] is False
+      and cert["purgedManifest"].get("escrowSealCiphertext") == "DESTROYED")
+code, payload = call("POST", f"/link/versions/{escrow['id']}/rebuild", analyst, {}, expect_error=True)
+check("到期后逐例重建返回 410", code == 410 and "逐例" in payload["error"], payload["error"])
+certs = call("GET", "/link/expiry-certificates", analyst)
+check("到期证明台账含不可逆统计审计摘要且留存",
+      any(c["linkVersionId"] == escrow["id"] and c["irreversibleDigest"].get("memberCount") is not None
+          for c in certs))
 
 print(f"\n汇总：PASS={len(PASS)} FAIL={len(FAIL)}")
 if FAIL:

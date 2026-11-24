@@ -13,6 +13,7 @@ const routes = [
       { path: 'query', component: () => import('./views/QueryView.vue') },
       { path: 'table-sets', component: () => import('./views/TableSetView.vue') },
       { path: 'deliverables', component: () => import('./views/DeliverablesView.vue') },
+      { path: 'link-versions', component: () => import('./views/LinkVersionsView.vue') },
       { path: 'budget', component: () => import('./views/BudgetView.vue') },
       { path: 'audit', component: () => import('./views/AuditView.vue') }
     ]

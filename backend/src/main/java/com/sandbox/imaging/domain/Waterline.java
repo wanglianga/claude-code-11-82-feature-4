@@ -32,6 +32,8 @@ public class Waterline {
 
     public Long getId() { return id; }
     public String getLabel() { return label; }
+    public void setLabel(String label) { this.label = label; }
     public String getDescription() { return description; }
     public long getCutoffAt() { return cutoffAt; }
+    public void setCutoffAt(long cutoffAt) { this.cutoffAt = cutoffAt; }
 }

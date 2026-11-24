@@ -13,6 +13,7 @@ public class ApiException extends RuntimeException {
     public static ApiException forbidden(String msg) { return new ApiException(403, msg); }
     public static ApiException notFound(String msg) { return new ApiException(404, msg); }
     public static ApiException conflict(String msg) { return new ApiException(409, msg); }
+    public static ApiException gone(String msg) { return new ApiException(410, msg); }
 
     public int getStatus() { return status; }
 }
